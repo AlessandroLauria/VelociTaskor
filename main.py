@@ -17,6 +17,7 @@ from kivy.graphics import Color, Rectangle
 from kivy.metrics import dp
 from kivy.uix.image import Image
 from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.switch import Switch
 
 import os
 import sys
@@ -24,7 +25,9 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-version = "1.0.0"
+from libs.notify.Notifier import Notifier
+
+version = "1.1.0"
 
 data = {
     "tabs": {
@@ -38,11 +41,22 @@ data = {
                     "OWNER": "myself",
                     "STATUS": "DONE",
                     "DATE": "2025-03-26",
-                    "NOTE": "usefull notes"
+                    "NOTE": "usefull notes",
+                    "NOTIFY": False
                 }
             }
         }
     }
+}
+
+cols_sizes = {
+    0: 0.15,  # PROJECT (15% della larghezza totale)
+    1: 0.25,  # TASK (25%)
+    2: 0.10,  # OWNER (15%)
+    3: 0.10,  # STATUS (15%)
+    4: 0.10,  # DATE (12%)
+    5: 0.35,  # NOTE (13%)
+    6: 0.05   # NOTIFY switch (5%)
 }
 
 class PathHandler():
@@ -140,6 +154,7 @@ class Save():
             with open(save_path, "r", encoding="utf-8") as file:
                 global data
                 data = json.load(file)
+        print(data)
 
     @classmethod
     def save_data(cls):
@@ -227,6 +242,8 @@ class TableRow(GridLayout):
                  status="",
                  date="",
                  note="",
+                 notify=False,
+                 last_notification=0,
                  **kwargs):
         super().__init__(**kwargs)
         self.tab_id = tab_id
@@ -237,8 +254,13 @@ class TableRow(GridLayout):
         self.stat = status
         self.dt = date
         self.nt = note
+        self.ntfy = notify
+        self.last_notification_time = float(last_notification)  # Converti in float
 
-        self.cols = 6
+        # Avvia il controllo periodico
+        Clock.schedule_interval(self.check_notification, 3600)  # Controlla ogni ora
+
+        self.cols = 7
         self.size_hint_y = None
         self.height = dp(40)
         self.spacing = dp(2)
@@ -250,6 +272,33 @@ class TableRow(GridLayout):
             size=self.update_graphics
         )
 
+        self.cols_minimum = cols_sizes
+
+    def check_notification(self, dt):
+        """Controlla se è passato il tempo stabilito dall'ultima notifica"""
+        if not self.notify_switch.active:
+            return
+
+        current_time = datetime.now().timestamp()
+        if current_time - self.last_notification_time >= 3590:
+            self.send_notification()
+            self.last_notification_time = current_time
+
+    def send_notification(self):
+        notify_data = {
+            "PROJECT": self.project.text,
+            "TASK": self.task.text,
+            "OWNER": self.owner.text,
+            "STATUS": self.status.text,
+            "DATE": self.date.text,
+            "NOTE": self.note.text,
+            "NOTIFY": self.notify_switch.active
+        }
+        notifier = Notifier()
+        notifier.send_task_notification(notify_data)
+        self.last_notification_time = datetime.now().timestamp()
+        self.save_row(None, None)  # Salva immediatamente il nuovo timestamp
+
     def save_row(self, instance, value):
         row_info = {
             "PROJECT": self.project.text,
@@ -257,7 +306,9 @@ class TableRow(GridLayout):
             "OWNER": self.owner.text,
             "STATUS": self.status.text,
             "DATE": self.date.text,
-            "NOTE": self.note.text
+            "NOTE": self.note.text,
+            "NOTIFY": self.notify_switch.active,
+            "LAST_NOTIFICATION": self.last_notification_time  # Aggiunto campo
         }
         Save.save_row(self.tab_id, self.id, row_info)
 
@@ -296,6 +347,25 @@ class TableRow(GridLayout):
         self.note.bind(focus=self.on_cell_focus)
         self.note.bind(text=self.save_row)
         self.add_widget(self.note)
+
+        self.notify_switch = Switch(active=self.ntfy)
+        self.notify_switch.bind(active=self.on_notify_switch)
+        self.add_widget(self.notify_switch)
+
+    def on_notify_switch(self, instance, value):
+        if value:  # Se lo switch è attivato
+            notify_data = {
+                "PROJECT": self.project.text,
+                "TASK": self.task.text,
+                "OWNER": self.owner.text,
+                "STATUS": self.status.text,
+                "DATE": self.date.text,
+                "NOTE": self.note.text,
+                "NOTIFY": self.notify_switch.active
+            }
+            notifier = Notifier()
+            notifier.send_task_notification(notify_data)
+        self.save_row(instance, value)
 
     def on_cell_focus(self, instance, value):
         if value:
@@ -337,10 +407,11 @@ class TableView(BoxLayout):
         super().__init__(**kwargs)
         self.orientation = 'vertical'
         self.spacing = dp(5)
+        self.bind(size=self.update_column_widths)  # Aggiungi questo binding
 
         # Intestazione fissa
-        self.header = GridLayout(cols=6, size_hint_y=None, height=dp(40), spacing=dp(2))
-        headers = ["PROJECT", "TASK", "OWNER", "STATUS", "DATE", "NOTE"]
+        self.header = GridLayout(cols=7, size_hint_y=None, height=dp(40), spacing=dp(2))
+        headers = ["PROJECT", "TASK", "OWNER", "STATUS", "DATE", "NOTE", "NOTIFY"]
         for header in headers:
             btn = Button(text=header)
             btn.bind(on_press=lambda x, h=header: self.sort_by_column(h))
@@ -355,15 +426,33 @@ class TableView(BoxLayout):
         self.add_widget(self.scroll_view)
 
         self.sort_reverse = False
-
         self.id = id
         self.tasks = tasks
         self.load_data()
 
+    def update_column_widths(self, *args):
+        """Calcola dinamicamente la larghezza delle colonne in base alla larghezza della finestra"""
+        total_width = self.width - dp(14)  # Sottrai lo spacing (7 colonne * 2dp di spacing)
+
+        # Proporzioni relative basate sulle dimensioni originali
+        total_original = sum(cols_sizes.values())
+        proportions = {k: v / total_original for k, v in cols_sizes.items()}
+
+        # Calcola le nuove dimensioni
+        new_sizes = {k: proportions[k] * total_width for k in proportions}
+
+        # Applica le nuove dimensioni all'header e alle righe
+        self.header.cols_minimum = new_sizes
+        for row in self.rows_layout.children:
+            if hasattr(row, 'cols_minimum'):
+                row.cols_minimum = new_sizes
+
     def load_data(self):
         for task_key in self.tasks.keys():
             task = self.tasks[task_key]
-            self.add_row(task_key, task["PROJECT"], task["TASK"], task["OWNER"], task["STATUS"], task["DATE"], task["NOTE"])
+            self.add_row(task_key, task["PROJECT"], task["TASK"], task["OWNER"],
+                         task["STATUS"], task["DATE"], task["NOTE"],
+                         task.get("NOTIFY", False), task.get("LAST_NOTIFICATION", 0))
 
     def on_touch_down(self, touch):
         if not self.rows_layout.collide_point(*touch.pos):
@@ -372,8 +461,10 @@ class TableView(BoxLayout):
                 self.selected_row = None
         return super().on_touch_down(touch)
 
-    def add_row(self, id=-1, project="", task="", owner="", status="BACKLOG", date=datetime.now().strftime("%Y-%m-%d"), note=""):
-        new_row = TableRow(self.id, id, project, task, owner, status, date, note)
+    def add_row(self, id=-1, project="", task="", owner="", status="BACKLOG",
+                date=datetime.now().strftime("%Y-%m-%d"), note="", notify=False,
+                last_notification=0):
+        new_row = TableRow(self.id, id, project, task, owner, status, date, note, notify, last_notification)
         new_row.bind(on_touch_down=lambda instance, t: self.select_row(instance, t))
         self.rows_layout.add_widget(new_row)
         new_row.update_status(None, status)
@@ -391,7 +482,7 @@ class TableView(BoxLayout):
                 self.selected_row = None
 
     def sort_by_column(self, column_name):
-        col_index = ["PROJECT", "TASK", "OWNER", "STATUS", "DATE", "NOTE"].index(column_name)
+        col_index = ["PROJECT", "TASK", "OWNER", "STATUS", "DATE", "NOTE", "NOTIFY"].index(column_name)
         rows = self.rows_layout.children.copy()
 
         def get_key(row):
@@ -436,8 +527,7 @@ class MainPanel(TabbedPanel):
         # Layout principale che permette il posizionamento libero
         layout = FloatLayout()
 
-        # Icona 512x512 centrata
-        icon = Image(source=PathHandler.icon_path(), size_hint=(None, None), size=(512, 512))
+        icon = Image(source=PathHandler.icon_path(), size_hint=(None, None), size=(dp(256), dp(256)))
         icon.pos_hint = {'center_x': 0.5, 'center_y': 0.7}
         layout.add_widget(icon)
 
@@ -620,6 +710,7 @@ class MainPanel(TabbedPanel):
 class VelociTaskorApp(App):
     def build(self):
         Window.set_icon(PathHandler.icon_path())
+        Window.size = (dp(900), dp(550))
         Save.load_data()
         return MainPanel()
 
