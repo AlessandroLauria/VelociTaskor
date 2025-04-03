@@ -280,7 +280,7 @@ class TableRow(GridLayout):
             return
 
         current_time = datetime.now().timestamp()
-        if current_time - self.last_notification_time >= 3590:
+        if current_time - self.last_notification_time >= 3590*24:
             self.send_notification()
             self.last_notification_time = current_time
 
